@@ -39,9 +39,14 @@ Add following MACROS to the new host:
 
 Now you can view the traffic on your github repository. Use the dashboard from the template, or add the items to your own dashboard!  
 
+## Informations
+API Reference "REST API endpoints for repository traffic":
+* [Github API - Traffic](https://docs.github.com/en/rest/metrics/traffic?apiVersion=2022-11-28) 
+
 ## Version History
 * 0.1
     * Initial Release
 
 ## Acknowledgments
 * [Zabbix Template - Github](https://git.zabbix.com/projects/ZBX/repos/zabbix/browse/templates/app/github_http?at=release/7.2) 
+* [Github API - Traffic](https://docs.github.com/en/rest/metrics/traffic?apiVersion=2022-11-28) 

@@ -1,0 +1,1156 @@
+zabbix_export:
+  version: '7.0'
+  template_groups:
+    - uuid: a571c0d144b14fd4a87a9d9b2aa9fcd6
+      name: Templates/Applications
+  templates:
+    - uuid: 5a342e87811a43af99a74612810aa727
+      template: 'GitHub repository traffic'
+      name: 'GitHub repository traffic'
+      description: |
+        You can track the traffic (views/clones/stargazers/..) on your Github repositories with this template.
+        
+        For more details about GitHub REST API, refer to the official documentation:
+        https://docs.github.com/en/rest?apiVersion=2022-11-28
+        
+        ---
+        
+        https://github.com/thetorminal/zabbix-github-traffic
+      groups:
+        - name: Templates/Applications
+      items:
+        - uuid: b8255f6a3bec45878dd7cb6cb7d4c3f1
+          name: 'Repository all clones'
+          type: DEPENDENT
+          key: github.repo.repository.clones.all
+          delay: '0'
+          description: 'The number of all repository clones.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.data..count.first()
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 3h
+          master_item:
+            key: github.repo.repository.get.clones
+          tags:
+            - tag: component
+              value: repository
+        - uuid: 7112a68aea4a4519a354d1d5fb57ad37
+          name: 'Repository unique clones'
+          type: DEPENDENT
+          key: github.repo.repository.clones.unique
+          delay: '0'
+          description: 'The number of unique GitHub users who have cloned the repository.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.data..uniques.first()
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 3h
+          master_item:
+            key: github.repo.repository.get.clones
+          tags:
+            - tag: component
+              value: repository
+        - uuid: c8e2df0f210e419caa5a4b31de20284e
+          name: 'Get repository'
+          type: SCRIPT
+          key: github.repo.repository.get
+          delay: '{$GITHUB.INTERVAL:"get_repo"}'
+          history: '0'
+          value_type: TEXT
+          trends: '0'
+          params: |
+            var github = {
+            	params: {},
+            
+            	setParams: function (params, required) {
+            		required = required || [];
+            		required.concat(['api_url', 'user_agent', 'api_version', 'repo_owner', 'repo_name', 'pagination_required', 'api_token']).forEach(function (field) {
+            			if (typeof params !== 'object' || typeof params[field] === 'undefined'
+            				|| params[field] === '') {
+            				throw 'Required parameter is not set: "' + field + '".';
+            			}
+            		});
+            
+            		github.params = params;
+            
+            		if (typeof github.params.api_url === 'string' && !github.params.api_url.endsWith('/')) {
+            			github.params.api_url += '/';
+            		}
+            	},
+            
+            	apiRequest: function (url, pagination_required) {
+            		const next_pattern = /<([^>]+)>;\s*rel="next"/i;
+            		var request = new HttpRequest(),
+            			response,
+            			headers,
+            			final_data = {
+            				headers: {},
+            				data: []
+            			};
+            
+            		pagination_required = (typeof pagination_required !== 'undefined') ? pagination_required : 'true';
+            
+            		request.addHeader('User-Agent: ' + github.params.user_agent);
+            		request.addHeader('Accept: application/vnd.github+json');
+            		request.addHeader('X-GitHub-Api-Version: ' + github.params.api_version);
+            		request.addHeader('Authorization: Bearer ' + github.params.api_token);
+            
+            		if (typeof github.params.http_proxy !== 'undefined' && github.params.http_proxy !== '') {
+            			request.setProxy(github.params.http_proxy);
+            			Zabbix.log(4, '[ GitHub Repo ] Using HTTP proxy: ' + github.params.http_proxy);
+            		}
+            
+            		while (url) {
+            			Zabbix.log(4, '[ GitHub Repo ] Sending request: ' + url);
+            
+            			response = request.get(url);
+            
+            			Zabbix.log(4, '[ GitHub Repo ] Received response with status code ' + request.getStatus() + ': ' + response);
+            
+            			if (request.getStatus() < 200 || request.getStatus() >= 300) {
+            				throw 'Request failed with status code ' + request.getStatus() + ': ' + response;
+            			}
+            
+            			try {
+            				response = JSON.parse(response);
+            			}
+            			catch (error) {
+            				throw 'Failed to parse response received from API. Check debug log for more information.';
+            			}
+            
+            			var parsed_data = github.parseData(response);
+            			final_data.data = final_data.data.concat(parsed_data);
+            
+            			headers = request.getHeaders();
+            
+            			url = ((headers.link || '').match(next_pattern) || [])[1];
+            
+            			if (pagination_required === 'false') {
+            				url = '';
+            			}
+            		}
+            
+            		final_data.headers = request.getHeaders();
+            
+            		delete request;
+            
+            		return final_data;
+            	},
+            
+            	parseData: function (response_data) {
+            		if (!response_data) {
+            			return [];
+            		}
+            
+            		const normalization_required = "total_count" in response_data && !("url" in response_data);
+            		if (!normalization_required) return response_data;
+            
+            		delete response_data.incomplete_results;
+            		delete response_data.repository_selection;
+            		delete response_data.total_count;
+            
+            		const namespaceKey = Object.keys(response_data)[0];
+            		response_data = response_data[namespaceKey];
+            
+            		return response_data;
+            	},
+            
+            	itemsCount: function (response_data) {
+            		const last_page_number = /<[^>]+page=(\d+)>;\s*rel="last"/i;
+            
+            		if (response_data.headers.link){
+            			return response_data.headers.link.match(last_page_number)[1];
+            		}
+            
+            		return response_data.data.length;
+            	}
+            }
+            
+            try {
+            	github.setParams(JSON.parse(value), ['api_query']);
+            
+            	var repo_data = github.apiRequest(github.params.api_url + github.params.api_query);
+            
+            	if (repo_data.data[0].fork === false) {
+            		var repo_community_profile = github.apiRequest(github.params.api_url + github.params.api_query + '/community/profile');
+            
+            		repo_data.data[0].zbx_community_profile = repo_community_profile.data[0];
+            	}
+            
+            	return JSON.stringify(repo_data);
+            }
+            catch (error) {
+            	error += (String(error).endsWith('.')) ? '' : '.';
+            	Zabbix.log(3, '[ GitHub Repo ] ERROR: ' + error);
+            	return JSON.stringify({ error: error });
+            }
+          description: |
+            Get the general repository information. If the repository is not a fork, the community profile metrics are also retrieved.
+            
+            Information about endpoint:
+            https://docs.github.com/en/rest/repos/repos?apiVersion=2022-11-28#get-a-repository
+            
+            Information about community profile metrics:
+            https://docs.github.com/en/rest/metrics/community?apiVersion=2022-11-28#get-community-profile-metrics
+          timeout: '{$GITHUB.TIMEOUT:"get_repo"}'
+          parameters:
+            - name: api_query
+              value: 'repos/{$GITHUB.REPO.OWNER}/{$GITHUB.REPO.NAME}'
+            - name: api_token
+              value: '{$GITHUB.API.TOKEN}'
+            - name: api_url
+              value: '{$GITHUB.API.URL}'
+            - name: api_version
+              value: '{$GITHUB.API_VERSION}'
+            - name: http_proxy
+              value: '{$GITHUB.HTTP_PROXY}'
+            - name: pagination_required
+              value: 'false'
+            - name: repo_name
+              value: '{$GITHUB.REPO.NAME}'
+            - name: repo_owner
+              value: '{$GITHUB.REPO.OWNER}'
+            - name: user_agent
+              value: '{$GITHUB.USER_AGENT}'
+          tags:
+            - tag: component
+              value: raw
+        - uuid: 0f146ae4677b4914b5f5ff9f573153a6
+          name: 'Get repository data check'
+          type: DEPENDENT
+          key: github.repo.repository.get.check
+          delay: '0'
+          value_type: TEXT
+          trends: '0'
+          description: 'Data collection check.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.error
+              error_handler: CUSTOM_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 3h
+          master_item:
+            key: github.repo.repository.get
+          tags:
+            - tag: component
+              value: status
+          triggers:
+            - uuid: 3c8f62e1d4734b28b7e7e857ca1b29bc
+              expression: 'length(last(/GitHub repository traffic/github.repo.repository.get.check))>0'
+              name: 'GitHub: There are errors in requests to API'
+              priority: AVERAGE
+              description: 'Errors have been received in response to API requests. Check the latest values for details.'
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: 2a38ed4284c946f5942fda148940611f
+          name: 'Get repository traffic clones'
+          type: SCRIPT
+          key: github.repo.repository.get.clones
+          delay: '{$GITHUB.INTERVAL:"get_repo"}'
+          history: '0'
+          value_type: TEXT
+          trends: '0'
+          params: |
+            var github = {
+            	params: {},
+            
+            	setParams: function (params, required) {
+            		required = required || [];
+            		required.concat(['api_url', 'user_agent', 'api_version', 'repo_owner', 'repo_name', 'pagination_required', 'api_token']).forEach(function (field) {
+            			if (typeof params !== 'object' || typeof params[field] === 'undefined'
+            				|| params[field] === '') {
+            				throw 'Required parameter is not set: "' + field + '".';
+            			}
+            		});
+            
+            		github.params = params;
+            
+            		if (typeof github.params.api_url === 'string' && !github.params.api_url.endsWith('/')) {
+            			github.params.api_url += '/';
+            		}
+            	},
+            
+            	apiRequest: function (url, pagination_required) {
+            		const next_pattern = /<([^>]+)>;\s*rel="next"/i;
+            		var request = new HttpRequest(),
+            			response,
+            			headers,
+            			final_data = {
+            				headers: {},
+            				data: []
+            			};
+            
+            		pagination_required = (typeof pagination_required !== 'undefined') ? pagination_required : 'true';
+            
+            		request.addHeader('User-Agent: ' + github.params.user_agent);
+            		request.addHeader('Accept: application/vnd.github+json');
+            		request.addHeader('X-GitHub-Api-Version: ' + github.params.api_version);
+            		request.addHeader('Authorization: Bearer ' + github.params.api_token);
+            
+            		if (typeof github.params.http_proxy !== 'undefined' && github.params.http_proxy !== '') {
+            			request.setProxy(github.params.http_proxy);
+            			Zabbix.log(4, '[ GitHub Repo ] Using HTTP proxy: ' + github.params.http_proxy);
+            		}
+            
+            		while (url) {
+            			Zabbix.log(4, '[ GitHub Repo ] Sending request: ' + url);
+            
+            			response = request.get(url);
+            
+            			Zabbix.log(4, '[ GitHub Repo ] Received response with status code ' + request.getStatus() + ': ' + response);
+            
+            			if (request.getStatus() < 200 || request.getStatus() >= 300) {
+            				throw 'Request failed with status code ' + request.getStatus() + ': ' + response;
+            			}
+            
+            			try {
+            				response = JSON.parse(response);
+            			}
+            			catch (error) {
+            				throw 'Failed to parse response received from API. Check debug log for more information.';
+            			}
+            
+            			var parsed_data = github.parseData(response);
+            			final_data.data = final_data.data.concat(parsed_data);
+            
+            			headers = request.getHeaders();
+            
+            			url = ((headers.link || '').match(next_pattern) || [])[1];
+            
+            			if (pagination_required === 'false') {
+            				url = '';
+            			}
+            		}
+            
+            		final_data.headers = request.getHeaders();
+            
+            		delete request;
+            
+            		return final_data;
+            	},
+            
+            	parseData: function (response_data) {
+            		if (!response_data) {
+            			return [];
+            		}
+            
+            		const normalization_required = "total_count" in response_data && !("url" in response_data);
+            		if (!normalization_required) return response_data;
+            
+            		delete response_data.incomplete_results;
+            		delete response_data.repository_selection;
+            		delete response_data.total_count;
+            
+            		const namespaceKey = Object.keys(response_data)[0];
+            		response_data = response_data[namespaceKey];
+            
+            		return response_data;
+            	},
+            
+            	itemsCount: function (response_data) {
+            		const last_page_number = /<[^>]+page=(\d+)>;\s*rel="last"/i;
+            
+            		if (response_data.headers.link){
+            			return response_data.headers.link.match(last_page_number)[1];
+            		}
+            
+            		return response_data.data.length;
+            	}
+            }
+            
+            try {
+            	github.setParams(JSON.parse(value), ['api_query']);
+            
+            	var repo_data = github.apiRequest(github.params.api_url + github.params.api_query);
+            
+            	if (repo_data.data[0].fork === false) {
+            		var repo_community_profile = github.apiRequest(github.params.api_url + github.params.api_query + '/community/profile');
+            
+            		repo_data.data[0].zbx_community_profile = repo_community_profile.data[0];
+            	}
+            
+            	return JSON.stringify(repo_data);
+            }
+            catch (error) {
+            	error += (String(error).endsWith('.')) ? '' : '.';
+            	Zabbix.log(3, '[ GitHub Repo ] ERROR: ' + error);
+            	return JSON.stringify({ error: error });
+            }
+          description: |
+            Get the general repository information. If the repository is not a fork, the community profile metrics are also retrieved.
+            
+            Information about endpoint:
+            https://docs.github.com/en/rest/repos/repos?apiVersion=2022-11-28#get-a-repository
+            
+            Information about community profile metrics:
+            https://docs.github.com/en/rest/metrics/community?apiVersion=2022-11-28#get-community-profile-metrics
+          timeout: '{$GITHUB.TIMEOUT:"get_repo"}'
+          parameters:
+            - name: api_query
+              value: 'repos/{$GITHUB.REPO.OWNER}/{$GITHUB.REPO.NAME}/traffic/clones'
+            - name: api_token
+              value: '{$GITHUB.API.TOKEN}'
+            - name: api_url
+              value: '{$GITHUB.API.URL}'
+            - name: api_version
+              value: '{$GITHUB.API_VERSION}'
+            - name: http_proxy
+              value: '{$GITHUB.HTTP_PROXY}'
+            - name: pagination_required
+              value: 'false'
+            - name: repo_name
+              value: '{$GITHUB.REPO.NAME}'
+            - name: repo_owner
+              value: '{$GITHUB.REPO.OWNER}'
+            - name: user_agent
+              value: '{$GITHUB.USER_AGENT}'
+          tags:
+            - tag: component
+              value: raw
+        - uuid: eabc8f04a21b44f6ba85d395e19b2add
+          name: 'Get repository traffic views'
+          type: SCRIPT
+          key: github.repo.repository.get.views
+          delay: '{$GITHUB.INTERVAL:"get_repo"}'
+          history: '0'
+          value_type: TEXT
+          trends: '0'
+          params: |
+            var github = {
+            	params: {},
+            
+            	setParams: function (params, required) {
+            		required = required || [];
+            		required.concat(['api_url', 'user_agent', 'api_version', 'repo_owner', 'repo_name', 'pagination_required', 'api_token']).forEach(function (field) {
+            			if (typeof params !== 'object' || typeof params[field] === 'undefined'
+            				|| params[field] === '') {
+            				throw 'Required parameter is not set: "' + field + '".';
+            			}
+            		});
+            
+            		github.params = params;
+            
+            		if (typeof github.params.api_url === 'string' && !github.params.api_url.endsWith('/')) {
+            			github.params.api_url += '/';
+            		}
+            	},
+            
+            	apiRequest: function (url, pagination_required) {
+            		const next_pattern = /<([^>]+)>;\s*rel="next"/i;
+            		var request = new HttpRequest(),
+            			response,
+            			headers,
+            			final_data = {
+            				headers: {},
+            				data: []
+            			};
+            
+            		pagination_required = (typeof pagination_required !== 'undefined') ? pagination_required : 'true';
+            
+            		request.addHeader('User-Agent: ' + github.params.user_agent);
+            		request.addHeader('Accept: application/vnd.github+json');
+            		request.addHeader('X-GitHub-Api-Version: ' + github.params.api_version);
+            		request.addHeader('Authorization: Bearer ' + github.params.api_token);
+            
+            		if (typeof github.params.http_proxy !== 'undefined' && github.params.http_proxy !== '') {
+            			request.setProxy(github.params.http_proxy);
+            			Zabbix.log(4, '[ GitHub Repo ] Using HTTP proxy: ' + github.params.http_proxy);
+            		}
+            
+            		while (url) {
+            			Zabbix.log(4, '[ GitHub Repo ] Sending request: ' + url);
+            
+            			response = request.get(url);
+            
+            			Zabbix.log(4, '[ GitHub Repo ] Received response with status code ' + request.getStatus() + ': ' + response);
+            
+            			if (request.getStatus() < 200 || request.getStatus() >= 300) {
+            				throw 'Request failed with status code ' + request.getStatus() + ': ' + response;
+            			}
+            
+            			try {
+            				response = JSON.parse(response);
+            			}
+            			catch (error) {
+            				throw 'Failed to parse response received from API. Check debug log for more information.';
+            			}
+            
+            			var parsed_data = github.parseData(response);
+            			final_data.data = final_data.data.concat(parsed_data);
+            
+            			headers = request.getHeaders();
+            
+            			url = ((headers.link || '').match(next_pattern) || [])[1];
+            
+            			if (pagination_required === 'false') {
+            				url = '';
+            			}
+            		}
+            
+            		final_data.headers = request.getHeaders();
+            
+            		delete request;
+            
+            		return final_data;
+            	},
+            
+            	parseData: function (response_data) {
+            		if (!response_data) {
+            			return [];
+            		}
+            
+            		const normalization_required = "total_count" in response_data && !("url" in response_data);
+            		if (!normalization_required) return response_data;
+            
+            		delete response_data.incomplete_results;
+            		delete response_data.repository_selection;
+            		delete response_data.total_count;
+            
+            		const namespaceKey = Object.keys(response_data)[0];
+            		response_data = response_data[namespaceKey];
+            
+            		return response_data;
+            	},
+            
+            	itemsCount: function (response_data) {
+            		const last_page_number = /<[^>]+page=(\d+)>;\s*rel="last"/i;
+            
+            		if (response_data.headers.link){
+            			return response_data.headers.link.match(last_page_number)[1];
+            		}
+            
+            		return response_data.data.length;
+            	}
+            }
+            
+            try {
+            	github.setParams(JSON.parse(value), ['api_query']);
+            
+            	var repo_data = github.apiRequest(github.params.api_url + github.params.api_query);
+            
+            	if (repo_data.data[0].fork === false) {
+            		var repo_community_profile = github.apiRequest(github.params.api_url + github.params.api_query + '/community/profile');
+            
+            		repo_data.data[0].zbx_community_profile = repo_community_profile.data[0];
+            	}
+            
+            	return JSON.stringify(repo_data);
+            }
+            catch (error) {
+            	error += (String(error).endsWith('.')) ? '' : '.';
+            	Zabbix.log(3, '[ GitHub Repo ] ERROR: ' + error);
+            	return JSON.stringify({ error: error });
+            }
+          description: |
+            Get the repository traffic.
+            
+            Information about endpoint:
+            https://docs.github.com/en/rest/metrics/traffic?apiVersion=2022-11-28
+          timeout: '{$GITHUB.TIMEOUT:"get_repo"}'
+          parameters:
+            - name: api_query
+              value: 'repos/{$GITHUB.REPO.OWNER}/{$GITHUB.REPO.NAME}/traffic/views'
+            - name: api_token
+              value: '{$GITHUB.API.TOKEN}'
+            - name: api_url
+              value: '{$GITHUB.API.URL}'
+            - name: api_version
+              value: '{$GITHUB.API_VERSION}'
+            - name: http_proxy
+              value: '{$GITHUB.HTTP_PROXY}'
+            - name: pagination_required
+              value: 'false'
+            - name: repo_name
+              value: '{$GITHUB.REPO.NAME}'
+            - name: repo_owner
+              value: '{$GITHUB.REPO.OWNER}'
+            - name: user_agent
+              value: '{$GITHUB.USER_AGENT}'
+          tags:
+            - tag: component
+              value: raw
+        - uuid: fdf75dafa98647c6b4d86f99e291a08c
+          name: 'Repository stargazers'
+          type: DEPENDENT
+          key: github.repo.repository.stargazers
+          delay: '0'
+          description: 'The number of GitHub users who have starred the repository.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.data..stargazers_count.first()
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 3h
+          master_item:
+            key: github.repo.repository.get
+          tags:
+            - tag: component
+              value: repository
+          triggers:
+            - uuid: 474e6c5230f14b8b9698f1c2ae43e0b7
+              expression: 'change(/GitHub repository traffic/github.repo.repository.stargazers)=1'
+              name: '{HOST.NAME}: New Stargazer!'
+              priority: INFO
+        - uuid: 224d9291f92743b1b5b1e782450572fe
+          name: 'Repository all views'
+          type: DEPENDENT
+          key: github.repo.repository.views.all
+          delay: '0'
+          description: 'The number of GitHub of all views of the repository.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.data..count.first()
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 3h
+          master_item:
+            key: github.repo.repository.get.views
+          tags:
+            - tag: component
+              value: repository
+        - uuid: 750eb9960f6b466597354396c62aca88
+          name: 'Repository unique views'
+          type: DEPENDENT
+          key: github.repo.repository.views.unique
+          delay: '0'
+          description: 'The number of GitHub of unique amount of views of the repository.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.data..uniques.first()
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 3h
+          master_item:
+            key: github.repo.repository.get.views
+          tags:
+            - tag: component
+              value: repository
+        - uuid: 44e7ce60ef844359906d30b7891e75d3
+          name: 'Repository watchers'
+          type: DEPENDENT
+          key: github.repo.repository.watchers
+          delay: '0'
+          description: 'The number of GitHub users who are subscribed to the repository.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.data..subscribers_count.first()
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 3h
+          master_item:
+            key: github.repo.repository.get
+          tags:
+            - tag: component
+              value: repository
+        - uuid: 53781527f1aa4a16b84e8b55e0da7ee6
+          name: 'Request limit'
+          type: DEPENDENT
+          key: github.repo.requests.limit
+          delay: '0'
+          description: |
+            API request limit.
+            
+            Information about request limits in GitHub REST API documentation:
+            https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api?apiVersion=2022-11-28
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.headers[''x-ratelimit-limit'']'
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 3h
+          master_item:
+            key: github.repo.repository.get
+          tags:
+            - tag: component
+              value: request-limits
+        - uuid: 44ec79dc3da944b4a638b811c11c38ab
+          name: 'Requests used'
+          type: DEPENDENT
+          key: github.repo.requests.used
+          delay: '0'
+          description: |
+            The number of used API requests.
+            
+            Information about request limits in GitHub REST API documentation:
+            https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api?apiVersion=2022-11-28
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.headers[''x-ratelimit-used'']'
+          master_item:
+            key: github.repo.repository.get
+          tags:
+            - tag: component
+              value: request-limits
+        - uuid: 4f80d07e4462424c945cf9cb94cc0f61
+          name: 'Request limit utilization, in %'
+          type: DEPENDENT
+          key: github.repo.requests.util
+          delay: '0'
+          value_type: FLOAT
+          units: '%'
+          description: |
+            The calculated utilization of the API request limit in %.
+            
+            Information about request limits in GitHub REST API documentation:
+            https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api?apiVersion=2022-11-28
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  const data = JSON.parse(value);
+                  
+                  const requests_limit = data.headers['x-ratelimit-limit'],
+                  	  requests_used = data.headers['x-ratelimit-used'];
+                  
+                  return requests_used / requests_limit * 100;
+          master_item:
+            key: github.repo.repository.get
+          tags:
+            - tag: component
+              value: request-limits
+          triggers:
+            - uuid: 6c2e63caa3ed4a79ab1d63ff8675dd22
+              expression: 'max(/GitHub repository traffic/github.repo.requests.util,1h)>{$GITHUB.REQUESTS.UTIL.WARN}'
+              recovery_mode: RECOVERY_EXPRESSION
+              recovery_expression: 'max(/GitHub repository traffic/github.repo.requests.util,1h)>{$GITHUB.REQUESTS.UTIL.WARN}-5'
+              name: 'GitHub: API request limit utilization is high'
+              event_name: 'GitHub: API request limit utilization is high (usage is > {$GITHUB.REQUESTS.UTIL.WARN})'
+              priority: WARNING
+              description: |
+                The API request limit utilization is high. It can be lowered by increasing the update intervals for script items (by setting up higher values in corresponding context macros).
+                
+                The trigger will be resolved automatically if the limit usage drops 5% below the trigger threshold.
+                
+                Information about request limits in GitHub REST API documentation:
+                https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api?apiVersion=2022-11-28
+              dependencies:
+                - name: 'GitHub: API request limit utilization is very high'
+                  expression: 'max(/GitHub repository traffic/github.repo.requests.util,1h)>{$GITHUB.REQUESTS.UTIL.HIGH}'
+                  recovery_expression: 'max(/GitHub repository traffic/github.repo.requests.util,1h)>{$GITHUB.REQUESTS.UTIL.HIGH}-5'
+              tags:
+                - tag: scope
+                  value: availability
+                - tag: scope
+                  value: capacity
+            - uuid: ed196be323a04f39a18d5e9d6cd41f6b
+              expression: 'max(/GitHub repository traffic/github.repo.requests.util,1h)>{$GITHUB.REQUESTS.UTIL.HIGH}'
+              recovery_mode: RECOVERY_EXPRESSION
+              recovery_expression: 'max(/GitHub repository traffic/github.repo.requests.util,1h)>{$GITHUB.REQUESTS.UTIL.HIGH}-5'
+              name: 'GitHub: API request limit utilization is very high'
+              event_name: 'GitHub: API request limit utilization is very high (usage is > {$GITHUB.REQUESTS.UTIL.HIGH})'
+              priority: AVERAGE
+              description: |
+                The API request limit utilization is very high. It can be lowered by increasing the update intervals for script items (by setting up higher values in corresponding context macros).
+                
+                The trigger will be resolved automatically if the limit usage drops 5% below the trigger threshold.
+                
+                Information about request limits in GitHub REST API documentation:
+                https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api?apiVersion=2022-11-28
+              tags:
+                - tag: scope
+                  value: availability
+                - tag: scope
+                  value: capacity
+      discovery_rules:
+        - uuid: 988e7967195044b1bed031df1b3ec322
+          name: 'Discovery of community profile metrics'
+          type: DEPENDENT
+          key: github.repo.community_profile.discovery
+          delay: '0'
+          description: |
+            Discovers community profile metrics (the repository must not be a fork).
+            
+            Information about community profile metrics:
+            https://docs.github.com/en/rest/metrics/community?apiVersion=2022-11-28#get-community-profile-metrics
+          item_prototypes:
+            - uuid: b26b496fec0044859e3cd215f6cf5598
+              name: 'Health percentage score'
+              type: DEPENDENT
+              key: 'github.repo.repository.health[{#SINGLETON}]'
+              delay: '0'
+              units: '%'
+              description: |
+                The health percentage score is defined as a percentage of how many of the recommended community health files are present.
+                
+                For more information, see the documentation:
+                https://docs.github.com/en/communities/setting-up-your-project-for-healthy-contributions/about-community-profiles-for-public-repositories
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.data..zbx_community_profile.health_percentage.first()
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 1h
+              master_item:
+                key: github.repo.repository.get
+              tags:
+                - tag: component
+                  value: health
+          graph_prototypes:
+            - uuid: 0627a017f9fb4ad4ba677b75f84e8863
+              name: 'Health percentage score{#SINGLETON}'
+              ymin_type_1: FIXED
+              ymax_type_1: FIXED
+              graph_items:
+                - color: 199C0D
+                  item:
+                    host: 'GitHub repository traffic'
+                    key: 'github.repo.repository.health[{#SINGLETON}]'
+          master_item:
+            key: github.repo.repository.get
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  return JSON.stringify(JSON.parse(value).data[0].zbx_community_profile
+                  	? [{'{#SINGLETON}': ''}] : []);
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 6h
+      tags:
+        - tag: class
+          value: application
+        - tag: target
+          value: github
+        - tag: target
+          value: repository
+      macros:
+        - macro: '{$GITHUB.API.TOKEN}'
+          description: 'Set the access token here.'
+        - macro: '{$GITHUB.API.URL}'
+          value: 'https://api.github.com/'
+          description: 'Set the API URL here.'
+        - macro: '{$GITHUB.API_VERSION}'
+          value: '2022-11-28'
+          description: 'The API version that is used in headers for HTTP requests.'
+        - macro: '{$GITHUB.BRANCH.NAME.MATCHES}'
+          value: .+
+          description: 'The repository branch name regex filter to use in branch-related metric discovery - for including.'
+        - macro: '{$GITHUB.BRANCH.NAME.NOT_MATCHES}'
+          value: CHANGE_IF_NEEDED
+          description: 'The repository branch name regex filter to use in branch-related metric discovery - for excluding.'
+        - macro: '{$GITHUB.HTTP_PROXY}'
+          description: 'The HTTP proxy for script items (set if needed). If the macro is empty, then no proxy is used.'
+        - macro: '{$GITHUB.INTERVAL}'
+          value: 1m
+          description: 'The update interval for the script items that retrieve data from the API. Can be used with context if needed (check the context values in relevant items).'
+        - macro: '{$GITHUB.INTERVAL:"get_repo"}'
+          value: 15m
+          description: 'The update interval for the script item that retrieves the repository information.'
+        - macro: '{$GITHUB.INTERVAL:regex:"get_last_run:.+"}'
+          value: 15m
+          description: 'The update interval for the script items that retrieve the information about the last workflow run results.'
+        - macro: '{$GITHUB.REPO.NAME}'
+          value: '<SET THE REPO NAME>'
+          description: 'Set the repository name here.'
+        - macro: '{$GITHUB.REPO.OWNER}'
+          value: '<SET THE REPO OWNER>'
+          description: 'Set the repository owner here.'
+        - macro: '{$GITHUB.REQUESTS.UTIL.HIGH}'
+          value: '90'
+          description: 'The threshold percentage of utilized API requests in a High trigger expression.'
+        - macro: '{$GITHUB.REQUESTS.UTIL.WARN}'
+          value: '80'
+          description: 'The threshold percentage of utilized API requests in a Warning trigger expression.'
+        - macro: '{$GITHUB.RESULTS_PER_PAGE}'
+          value: '100'
+          description: 'The number of results to fetch per page. Can be used with context and adjusted if needed (check the context values in script parameters of relevant items).'
+        - macro: '{$GITHUB.TIMEOUT}'
+          value: 15s
+          description: 'The timeout threshold for the script items that retrieve data from the API. Can be used with context if needed (check the context values in relevant items).'
+        - macro: '{$GITHUB.USER_AGENT}'
+          value: Zabbix/7.2
+          description: 'The user agent that is used in headers for HTTP requests.'
+      dashboards:
+        - uuid: 7fb25b0b9f16470e81bd293933cd0559
+          name: '{HOST.NAME}: Traffic'
+          pages:
+            - name: 'Traffic Overview'
+              widgets:
+                - type: item
+                  name: 'All Views'
+                  width: '7'
+                  height: '3'
+                  hide_header: 'YES'
+                  fields:
+                    - type: INTEGER
+                      name: decimal_places
+                      value: '0'
+                    - type: STRING
+                      name: description
+                      value: 'All Views'
+                    - type: ITEM
+                      name: itemid.0
+                      value:
+                        host: 'GitHub repository traffic'
+                        key: github.repo.repository.views.all
+                    - type: INTEGER
+                      name: show.0
+                      value: '1'
+                    - type: INTEGER
+                      name: show.1
+                      value: '2'
+                - type: svggraph
+                  name: 'Traffic: Views'
+                  'y': '3'
+                  width: '21'
+                  height: '4'
+                  fields:
+                    - type: STRING
+                      name: ds.0.color
+                      value: FF0000
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Repository all views'
+                    - type: INTEGER
+                      name: ds.0.transparency
+                      value: '7'
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '5'
+                    - type: STRING
+                      name: ds.1.color
+                      value: 00FF00
+                    - type: STRING
+                      name: ds.1.items.0
+                      value: 'Repository unique views'
+                    - type: INTEGER
+                      name: ds.1.missingdatafunc
+                      value: '1'
+                    - type: INTEGER
+                      name: ds.1.width
+                      value: '5'
+                    - type: STRING
+                      name: reference
+                      value: KVJGY
+                    - type: INTEGER
+                      name: righty
+                      value: '0'
+                - type: item
+                  name: 'Unique Views'
+                  x: '7'
+                  width: '7'
+                  height: '3'
+                  hide_header: 'YES'
+                  fields:
+                    - type: INTEGER
+                      name: decimal_places
+                      value: '0'
+                    - type: STRING
+                      name: description
+                      value: 'Unique Views'
+                    - type: ITEM
+                      name: itemid.0
+                      value:
+                        host: 'GitHub repository traffic'
+                        key: github.repo.repository.views.unique
+                    - type: INTEGER
+                      name: show.0
+                      value: '1'
+                    - type: INTEGER
+                      name: show.1
+                      value: '2'
+                - type: item
+                  name: 'All Clones'
+                  x: '14'
+                  width: '7'
+                  height: '3'
+                  hide_header: 'YES'
+                  fields:
+                    - type: INTEGER
+                      name: decimal_places
+                      value: '0'
+                    - type: STRING
+                      name: description
+                      value: 'All Clones'
+                    - type: ITEM
+                      name: itemid.0
+                      value:
+                        host: 'GitHub repository traffic'
+                        key: github.repo.repository.clones.all
+                    - type: INTEGER
+                      name: show.0
+                      value: '1'
+                    - type: INTEGER
+                      name: show.1
+                      value: '2'
+                - type: item
+                  name: 'Unique Clones'
+                  x: '21'
+                  width: '7'
+                  height: '3'
+                  hide_header: 'YES'
+                  fields:
+                    - type: INTEGER
+                      name: decimal_places
+                      value: '0'
+                    - type: STRING
+                      name: description
+                      value: 'Unique Clones'
+                    - type: ITEM
+                      name: itemid.0
+                      value:
+                        host: 'GitHub repository traffic'
+                        key: github.repo.repository.clones.unique
+                    - type: INTEGER
+                      name: show.0
+                      value: '1'
+                    - type: INTEGER
+                      name: show.1
+                      value: '2'
+                - type: svggraph
+                  name: 'Traffic: Clones'
+                  x: '21'
+                  'y': '3'
+                  width: '21'
+                  height: '4'
+                  fields:
+                    - type: STRING
+                      name: ds.0.color
+                      value: FF0000
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Repository all clones'
+                    - type: INTEGER
+                      name: ds.0.transparency
+                      value: '7'
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '5'
+                    - type: STRING
+                      name: ds.1.color
+                      value: 00FF00
+                    - type: STRING
+                      name: ds.1.items.0
+                      value: 'Repository all views'
+                    - type: INTEGER
+                      name: ds.1.missingdatafunc
+                      value: '1'
+                    - type: INTEGER
+                      name: ds.1.width
+                      value: '5'
+                    - type: STRING
+                      name: reference
+                      value: EJGFM
+                    - type: INTEGER
+                      name: righty
+                      value: '0'
+                - type: item
+                  name: Stargazers
+                  x: '28'
+                  width: '7'
+                  height: '3'
+                  hide_header: 'YES'
+                  fields:
+                    - type: INTEGER
+                      name: decimal_places
+                      value: '0'
+                    - type: STRING
+                      name: description
+                      value: Stargazers
+                    - type: ITEM
+                      name: itemid.0
+                      value:
+                        host: 'GitHub repository traffic'
+                        key: github.repo.repository.stargazers
+                    - type: INTEGER
+                      name: show.0
+                      value: '1'
+                    - type: INTEGER
+                      name: show.1
+                      value: '2'
+                - type: item
+                  name: Watchers
+                  x: '35'
+                  width: '7'
+                  height: '3'
+                  hide_header: 'YES'
+                  fields:
+                    - type: INTEGER
+                      name: decimal_places
+                      value: '0'
+                    - type: STRING
+                      name: description
+                      value: Watchers
+                    - type: ITEM
+                      name: itemid.0
+                      value:
+                        host: 'GitHub repository traffic'
+                        key: github.repo.repository.watchers
+                    - type: INTEGER
+                      name: show.0
+                      value: '1'
+                    - type: INTEGER
+                      name: show.1
+                      value: '2'
+      valuemaps:
+        - uuid: e5e66d5ee80f4e71ac2d5cfd9a5f3ad3
+          name: Boolean
+          mappings:
+            - value: '0'
+              newvalue: 'false'
+            - value: '1'
+              newvalue: 'true'
+  graphs:
+    - uuid: ee0edc87fa204991b1edf9907df27b36
+      name: 'All clones'
+      graph_items:
+        - color: 1A7C11
+          calc_fnc: ALL
+          item:
+            host: 'GitHub repository traffic'
+            key: github.repo.repository.clones.all
+    - uuid: 4217beff02e8411aa14d6c9ff6a1d618
+      name: 'All views'
+      graph_items:
+        - color: 1A7C11
+          calc_fnc: ALL
+          item:
+            host: 'GitHub repository traffic'
+            key: github.repo.repository.views.all
+    - uuid: f293a6920ad04d8dab099cda0278c74b
+      name: Stargazers
+      graph_items:
+        - color: 1A7C11
+          calc_fnc: ALL
+          item:
+            host: 'GitHub repository traffic'
+            key: github.repo.repository.stargazers
+    - uuid: 6b6f897c6acf4003a2b600aa7d31b1a9
+      name: 'Unique clones'
+      graph_items:
+        - color: 1A7C11
+          calc_fnc: ALL
+          item:
+            host: 'GitHub repository traffic'
+            key: github.repo.repository.clones.unique
+    - uuid: f5b73f54939b4c8db593340d34fb7957
+      name: 'Unique views'
+      graph_items:
+        - color: 1A7C11
+          calc_fnc: ALL
+          item:
+            host: 'GitHub repository traffic'
+            key: github.repo.repository.views.unique
+    - uuid: 0b731056cb6f4ffba1b9dea5d31cff6f
+      name: Watchers
+      graph_items:
+        - color: 1A7C11
+          calc_fnc: ALL
+          item:
+            host: 'GitHub repository traffic'
+            key: github.repo.repository.watchers

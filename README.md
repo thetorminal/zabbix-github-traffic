@@ -30,7 +30,7 @@ Tested with:
 
 #### On Zabbix frontend server:  
 - download and import the template `github-repository-traffic.yaml`
-- create a new host (named like your repo), add the template `github-repository-traffic.yaml` to the host and add Interface "Agent" (127.0.0.1:10050)  
+- create a new host (named like your repo), add the template `Github repository traffic` to the host and add Interface "Agent" (127.0.0.1:10050)  
 
 Add following MACROS to the new host: 
 - {$GITHUB.API.TOKEN} = your API Token

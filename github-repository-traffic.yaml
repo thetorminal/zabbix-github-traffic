@@ -846,7 +846,7 @@ zabbix_export:
         - macro: '{$GITHUB.HTTP_PROXY}'
           description: 'The HTTP proxy for script items (set if needed). If the macro is empty, then no proxy is used.'
         - macro: '{$GITHUB.INTERVAL}'
-          value: 1m
+          value: 15m
           description: 'The update interval for the script items that retrieve data from the API. Can be used with context if needed (check the context values in relevant items).'
         - macro: '{$GITHUB.INTERVAL:"get_repo"}'
           value: 15m
